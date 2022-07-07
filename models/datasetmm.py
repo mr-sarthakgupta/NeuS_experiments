@@ -7,9 +7,10 @@ from glob import glob
 from icecream import ic
 from scipy.spatial.transform import Rotation as Rot
 from scipy.spatial.transform import Slerp
+import logging.config
+from torch.utils.tensorboard import SummaryWriter
 # from intrinsics import LearnFocal
 # from models.poses import LearnPose
-
 
 # This function is borrowed from IDR: https://github.com/lioryariv/idr
 def load_K_Rt_from_P(filename, P=None):
@@ -26,7 +27,6 @@ def load_K_Rt_from_P(filename, P=None):
     t = out[2]
     K = K / K[2, 2]
     intrinsics = np.eye(4)
-    print(intrinsics)
     intrinsics[:3, :3] = K
     
     pose = np.eye(4, dtype=np.float32)
@@ -99,32 +99,46 @@ class Dataset:
     def dataset_load(self, pose_net, intrinsic_net, k):
         self.intrinsics_all = []
         self.pose_all = []
-        # k = 0
-        # for scale_mat, world_mat in zip(self.scale_mats_np, self.world_mats_np):
-            # P = world_mat @ scale_mat
-            # P = P[:3, :4]
-            # intrinsics, pose = load_K_Rt_from_P(None, P)
-            # # print('this is intrinsics')
-            # print('og_shape')
-            # print(intrinsics.shape)
-            # self.intrinsics_all.append(torch.from_numpy(intrinsics).float())
-        # print('intrinsic_shape')
-        # print(intrinsic_net(k).shape)
         self.intrinsics_all.append(intrinsic_net(k))
-        # self.pose_all.append(torch.from_numpy(pose).float())
         self.pose_all.append(pose_net(k))
-        # k = k + 1
         self.intrinsics_all = torch.stack(self.intrinsics_all).to(self.device)   # [n_images, 4, 4]
         self.intrinsics_all_inv = torch.inverse(self.intrinsics_all)  # [n_images, 4, 4]
         self.focal = self.intrinsics_all[0][0, 0]
         self.pose_all = torch.stack(self.pose_all).to(self.device)  # [n_images, 4, 4]
 
+    def get_intrinsics(self):
+        self.intrins_all = np.empty((self.n_images, 4, 4))
+        k = 0
+        for scale_mat, world_mat in zip(self.scale_mats_np, self.world_mats_np):
+            P = world_mat @ scale_mat
+            P = P[:3, :4]
+            intrinsics, pose = load_K_Rt_from_P(None, P)
+            self.intrins_all[k] = intrinsics
+            k = k + 1
+        print(self.intrins_all[0])
+        return self.intrins_all
 
+    def get_pose(self):
+        self.poses_all = np.empty((self.n_images, 4, 4))
+        k = 0
+        for scale_mat, world_mat in zip(self.scale_mats_np, self.world_mats_np):
+            P = world_mat @ scale_mat
+            P = P[:3, :4]
+            intrinsics, pose = load_K_Rt_from_P(None, P)
+            self.poses_all[k] = pose
+            k = k + 1
+        pose = torch.from_numpy(self.poses_all)
+        pose.requires_grad = False
+        return pose
+            
     def get_num_cams(self):
         return self.n_images
 
-    def get_img_dims(self):
-        return self.H, self.W
+    def get_H(self):
+        return self.H
+    
+    def get_W(self):
+        return self.W
 
     def gen_rays_at(self, img_idx, resolution_level=1):
         """
@@ -135,10 +149,10 @@ class Dataset:
         ty = torch.linspace(0, self.H - 1, self.H // l)
         pixels_x, pixels_y = torch.meshgrid(tx, ty)
         p = torch.stack([pixels_x, pixels_y, torch.ones_like(pixels_y)], dim=-1) # W, H, 3
-        p = torch.matmul(self.intrinsics_all_inv[img_idx, None, None, :3, :3], p[:, :, :, None]).squeeze()  # W, H, 3
+        p = torch.matmul(self.intrinsics_all_inv[0, None, None, :3, :3], p[:, :, :, None]).squeeze()  # W, H, 3
         rays_v = p / torch.linalg.norm(p, ord=2, dim=-1, keepdim=True)  # W, H, 3
-        rays_v = torch.matmul(self.pose_all[img_idx, None, None, :3, :3], rays_v[:, :, :, None]).squeeze()  # W, H, 3
-        rays_o = self.pose_all[img_idx, None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
+        rays_v = torch.matmul(self.pose_all[0, None, None, :3, :3], rays_v[:, :, :, None]).squeeze()  # W, H, 3
+        rays_o = self.pose_all[0, None, None, :3, 3].expand(rays_v.shape)  # W, H, 3
         return rays_o.transpose(0, 1), rays_v.transpose(0, 1)
 
     def gen_random_rays_at(self, img_idx, batch_size):
@@ -201,3 +215,5 @@ class Dataset:
         img = cv.imread(self.images_lis[idx])
         return (cv.resize(img, (self.W // resolution_level, self.H // resolution_level))).clip(0, 255)
 
+# if __name__ == '__main__':
+#     x = 

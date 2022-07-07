@@ -7,7 +7,7 @@ import cv2 as cv
 import trimesh
 import torch
 import torch.nn.functional as F
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 from shutil import copyfile
 from icecream import ic
 from tqdm import tqdm
@@ -17,7 +17,30 @@ from models.fields import RenderingNetwork, SDFNetwork, SingleVarianceNetwork, N
 from models.renderer import NeuSRenderer
 from models.intrinsics import LearnFocal
 from models.poses import LearnPose
+import datetime
 
+now = datetime.datetime.now()
+
+save_path = f"logs/logs_main_{now}"
+
+
+import sys
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(message)s')
+
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.DEBUG)
+stdout_handler.setFormatter(formatter)
+
+file_handler = logging.FileHandler(save_path)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+
+
+logger.addHandler(file_handler)
+logger.addHandler(stdout_handler)
 torch.autograd.set_detect_anomaly(True)
 
 class Runner:
@@ -65,8 +88,8 @@ class Runner:
         self.sdf_network = SDFNetwork(**self.conf['model.sdf_network']).to(self.device)
         self.deviation_network = SingleVarianceNetwork(**self.conf['model.variance_network']).to(self.device)
         self.color_network = RenderingNetwork(**self.conf['model.rendering_network']).to(self.device)
-        self.pose_net = LearnPose(num_cams = self.dataset.get_num_cams(), init_c2w = None)
-        self.intrinsic_net = LearnFocal(num_cams = self.dataset.get_num_cams())
+        self.pose_net = LearnPose(num_cams = self.dataset.get_num_cams(), init_c2w = self.dataset.get_pose().to(self.device).type(torch.float32))
+        self.intrinsic_net = LearnFocal(num_cams = self.dataset.get_num_cams(), intrinsic_init = self.dataset.get_intrinsics()) 
         params_to_train += list(self.nerf_outside.parameters())
         params_to_train += list(self.sdf_network.parameters())
         params_to_train += list(self.deviation_network.parameters())
@@ -74,7 +97,6 @@ class Runner:
         params_to_train += list(self.pose_net.parameters())
         params_to_train += list(self.intrinsic_net.parameters())
         self.optimizer = torch.optim.Adam(params_to_train, lr=self.learning_rate)
-        # self.pose_net = self.dataset.get_pose_net()
         self.renderer = NeuSRenderer(self.nerf_outside,
                                      self.sdf_network,
                                      self.deviation_network,
@@ -100,17 +122,11 @@ class Runner:
         if self.mode[:5] == 'train':
             self.file_backup()
 
-    # def loading_datset(self):
-    #     self.dataset.dataset_load(self.pose_netself.intrinsic_net)
-
     def train(self):
-        # self.dataset.dataset_load(self.pose_net, self.intrinsic_net)
-        self.writer = SummaryWriter(log_dir=os.path.join(self.base_exp_dir, 'logs'))
         self.update_learning_rate()
         res_step = self.end_iter - self.iter_step
         image_perm = self.get_image_perm()
-        # self.optimizer_pose = torch.optim.Adam(self.pose_net.parameters(), lr=0.001)
-
+        
         for iter_i in tqdm(range(res_step)):
             self.dataset.dataset_load(self.pose_net, self.intrinsic_net, image_perm[self.iter_step % len(image_perm)])
             data = self.dataset.gen_random_rays_at(image_perm[self.iter_step % len(image_perm)], self.batch_size)
@@ -159,14 +175,10 @@ class Runner:
 
             self.iter_step += 1
 
-            self.writer.add_scalar('Loss/loss', loss, self.iter_step)
-            self.writer.add_scalar('Loss/color_loss', color_fine_loss, self.iter_step)
-            self.writer.add_scalar('Loss/eikonal_loss', eikonal_loss, self.iter_step)
-            self.writer.add_scalar('Statistics/s_val', s_val.mean(), self.iter_step)
-            self.writer.add_scalar('Statistics/cdf', (cdf_fine[:, :1] * mask).sum() / mask_sum, self.iter_step)
-            self.writer.add_scalar('Statistics/weight_max', (weight_max * mask).sum() / mask_sum, self.iter_step)
-            self.writer.add_scalar('Statistics/psnr', psnr, self.iter_step)
-
+            
+            logging.info(f'Step: {self.iter_step}, Loss: {loss}, Colour_loss: {color_fine_loss}, Eikonal_loss: {eikonal_loss}')
+            
+            
             if self.iter_step % self.report_freq == 0:
                 print(self.base_exp_dir)
                 print('iter:{:8>d} loss = {} lr={}'.format(self.iter_step, loss, self.optimizer.param_groups[0]['lr']))
@@ -244,6 +256,8 @@ class Runner:
         torch.save(checkpoint, os.path.join(self.base_exp_dir, 'checkpoints', 'ckpt_{:0>6d}.pth'.format(self.iter_step)))
 
     def validate_image(self, idx=-1, resolution_level=-1):
+        self.pose_net.eval()
+        self.intrinsic_net.eval()
         if idx < 0:
             idx = np.random.randint(self.dataset.n_images)
 
@@ -251,15 +265,25 @@ class Runner:
 
         if resolution_level < 0:
             resolution_level = self.validate_resolution_level
-        rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
-        H, W, _ = rays_o.shape
-        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
-        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
+        # rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
+        # H, W, _ = rays_o.shape
+        # rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
+        # rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
 
         out_rgb_fine = []
         out_normal_fine = []
 
+        self.dataset.dataset_load(self.pose_net, self.intrinsic_net, idx)
+        rays_o, rays_d = self.dataset.gen_rays_at(idx, resolution_level=resolution_level)
+        H, W, _ = rays_o.shape
+        rays_o = rays_o.reshape(-1, 3).split(self.batch_size)
+        rays_d = rays_d.reshape(-1, 3).split(self.batch_size)
+        i = 0
         for rays_o_batch, rays_d_batch in zip(rays_o, rays_d):
+            print(i)
+            i = i + 1
+            # print(f'rays_o_batch : {rays_o_batch.shape}')
+            # print(f'rays_d_batch : {rays_d_batch.shape}')
             near, far = self.dataset.near_far_from_sphere(rays_o_batch, rays_d_batch)
             background_rgb = torch.ones([1, 3]) if self.use_white_bkgd else None
 
@@ -269,6 +293,7 @@ class Runner:
                                               far,
                                               cos_anneal_ratio=self.get_cos_anneal_ratio(),
                                               background_rgb=background_rgb)
+
 
             def feasible(key): return (key in render_out) and (render_out[key] is not None)
 
@@ -290,7 +315,7 @@ class Runner:
         normal_img = None
         if len(out_normal_fine) > 0:
             normal_img = np.concatenate(out_normal_fine, axis=0)
-            rot = np.linalg.inv(self.dataset.pose_all[idx, :3, :3].detach().cpu().numpy())
+            rot = np.linalg.inv(self.dataset.pose_all[0, :3, :3].detach().cpu().numpy())
             normal_img = (np.matmul(rot[None, :, :], normal_img[:, :, None])
                           .reshape([H, W, 3, -1]) * 128 + 128).clip(0, 255)
 
@@ -386,7 +411,7 @@ if __name__ == '__main__':
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
-    logging.basicConfig(level=logging.DEBUG, format=FORMAT)
+    # logging.basicConfig(level=logging.DEBUG, format=FORMAT)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--conf', type=str, default='./confs/base.conf')
@@ -403,6 +428,8 @@ if __name__ == '__main__':
 
     if args.mode == 'train':
         runner.train()
+    if args.mode == 'validate_image':
+        runner.validate_image()
     elif args.mode == 'validate_mesh':
         runner.validate_mesh(world_space=True, resolution=512, threshold=args.mcube_threshold)
     elif args.mode.startswith('interpolate'):  # Interpolate views given two image indices

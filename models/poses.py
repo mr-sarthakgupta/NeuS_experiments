@@ -1,26 +1,39 @@
 import torch
 import torch.nn as nn
 from scipy.spatial.transform import Rotation as RotLib
+from torch.utils.tensorboard import SummaryWriter
+import logging.config
+import os
+import datetime
 
-# def SO3_to_quat(R):
-#     """
-#     :param R:  (N, 3, 3) or (3, 3) np
-#     :return:   (N, 4, ) or (4, ) np
-#     """
-#     x = RotLib.from_matrix(R)
-#     quat = x.as_quat()
-#     return quat
+now = datetime.datetime.now()
+
+save_path = f"logs_poses/logs_{now}"
+
+import sys
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter('%(message)s')
+
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.DEBUG)
+stdout_handler.setFormatter(formatter)
+
+file_handler = logging.FileHandler(save_path)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
 
 
-# def quat_to_SO3(quat):
-#     """
-#     :param quat:    (N, 4, ) or (4, ) np
-#     :return:        (N, 3, 3) or (3, 3) np
-#     """
-#     x = RotLib.from_quat(quat)
-#     R = x.as_matrix()
-#     return R
+logger.addHandler(file_handler)
+logger.addHandler(stdout_handler)
 
+# logging.basicConfig(filename=save_path, 
+# 					format='%(name)s - %(levelname)s - %(message)s', 
+# 					filemode='w') 
+
+logger = logging.getLogger('spam_application')
+logger.setLevel(logging.DEBUG)
 
 def convert3x4_4x4(input):
     """
@@ -91,12 +104,18 @@ class LearnPose(nn.Module):
         """
         super(LearnPose, self).__init__()
         self.num_cams = num_cams
-        self.init_c2w = None
+        self.device = torch.device('cuda')
+        self.init_c2w = init_c2w
+        self.init_c2w.requires_grad = False
+        random_noise = 0.08*torch.randn(3, 4)
+        random_noise = torch.cat((random_noise, torch.tensor([[0, 0, 0, 0]])), dim = 0)
+        self.init_c2w_noisy = init_c2w + random_noise
         if init_c2w is not None:
-            self.init_c2w = nn.Parameter(init_c2w, requires_grad=False)
+            self.init_c2w_noisy = nn.Parameter(self.init_c2w_noisy, requires_grad=False)
 
-        self.r = nn.Parameter(torch.zeros(size=(num_cams, 3), dtype=torch.float32), requires_grad=True)  # (N, 3)
-        self.t = nn.Parameter(torch.zeros(size=(num_cams, 3), dtype=torch.float32), requires_grad=True)  # (N, 3)
+
+        self.r = nn.Parameter(torch.zeros(size=(self.num_cams, 3), dtype=torch.float32), requires_grad=True)  # (N, 3)
+        self.t = nn.Parameter(torch.zeros(size=(self.num_cams, 3), dtype=torch.float32), requires_grad=True)  # (N, 3)
 
     def forward(self, cam_id):
         r = self.r[cam_id]  # (3, ) axis-angle
@@ -105,6 +124,7 @@ class LearnPose(nn.Module):
 
         # learn a delta pose between init pose and target pose, if a init pose is provided
         if self.init_c2w is not None:
-            c2w = c2w @ self.init_c2w[cam_id]
-
+            c2w = c2w @ self.init_c2w_noisy[cam_id]
+        logging.info(f"This is the {cam_id}th extrinsics matrix: {c2w}")
+        logging.info(f"This is the {cam_id}th original matrix: {self.init_c2w[cam_id]}")
         return c2w
